@@ -603,6 +603,99 @@ function Export-UserPhoto {
     }
 }
 
+# Function to calculate password expiration date
+function Get-PasswordExpirationDate {
+    param(
+        $User,
+        [string]$Domain
+    )
+    
+    try {
+        # Check if password never expires
+        if ($User.PasswordNeverExpires -eq $true) {
+            return @{
+                ExpirationDate = $null
+                DaysRemaining = $null
+                Status = "Never Expires"
+                MaxPwdAgeDays = $null
+            }
+        }
+        
+        # Check if PasswordLastSet is null (password must be changed at next logon)
+        if ($null -eq $User.PasswordLastSet) {
+            return @{
+                ExpirationDate = $null
+                DaysRemaining = 0
+                Status = "Must Change at Next Logon"
+                MaxPwdAgeDays = $null
+            }
+        }
+        
+        # Get domain password policy
+        $domainPolicy = Get-ADDefaultDomainPasswordPolicy -Server $Domain -ErrorAction Stop
+        $maxPwdAge = $domainPolicy.MaxPasswordAge
+        
+        # If maxPwdAge is 0 or not set, passwords don't expire
+        if ($maxPwdAge.TotalDays -eq 0 -or $null -eq $maxPwdAge) {
+            return @{
+                ExpirationDate = $null
+                DaysRemaining = $null
+                Status = "Policy: No Expiration"
+                MaxPwdAgeDays = $null
+            }
+        }
+        
+        # Calculate expiration date
+        $expirationDate = $User.PasswordLastSet.AddDays($maxPwdAge.TotalDays)
+        $daysRemaining = [math]::Ceiling(($expirationDate - (Get-Date)).TotalDays)
+        
+        # Determine status
+        $status = if ($daysRemaining -lt 0) {
+            "EXPIRED"
+        } elseif ($daysRemaining -le 7) {
+            "Expires Soon!"
+        } elseif ($daysRemaining -le 14) {
+            "Warning"
+        } else {
+            "OK"
+        }
+        
+        return @{
+            ExpirationDate = $expirationDate
+            DaysRemaining = $daysRemaining
+            Status = $status
+            MaxPwdAgeDays = [math]::Round($maxPwdAge.TotalDays)
+        }
+    }
+    catch {
+        # Fallback: try using NET USER command
+        try {
+            $netUserOutput = net user $User.SamAccountName /domain 2>&1
+            $expiresLine = $netUserOutput | Where-Object { $_ -match "(senha expira|password expires)" }
+            if ($expiresLine -match "(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2})") {
+                $expirationDate = [DateTime]::Parse($Matches[1])
+                $daysRemaining = [math]::Ceiling(($expirationDate - (Get-Date)).TotalDays)
+                $status = if ($daysRemaining -lt 0) { "EXPIRED" } elseif ($daysRemaining -le 7) { "Expires Soon!" } else { "OK" }
+                
+                return @{
+                    ExpirationDate = $expirationDate
+                    DaysRemaining = $daysRemaining
+                    Status = $status
+                    MaxPwdAgeDays = $null
+                }
+            }
+        }
+        catch { }
+        
+        return @{
+            ExpirationDate = $null
+            DaysRemaining = $null
+            Status = "Could not determine"
+            MaxPwdAgeDays = $null
+        }
+    }
+}
+
 # Get current system user
 $CurrentLoggedUser = $env:USERNAME
 
@@ -985,12 +1078,38 @@ try {
             Write-Host "--- Account Status ---" -ForegroundColor Cyan
             Write-Host ("Account Enabled:   {0}" -f $User.Enabled)
             Write-Host ("Account Locked:    {0}" -f $User.LockedOut)
-            Write-Host ("Password Expired:  {0}" -f $User.PasswordExpired)
-            Write-Host ("Password Never Expires:{0}" -f $User.PasswordNeverExpires)
             Write-Host ("Last Logon:        {0}" -f $User.LastLogonDate)
-            Write-Host ("Password Changed:  {0}" -f $User.PasswordLastSet)
             Write-Host ("Account Created:   {0}" -f $User.Created)
             Write-Host ("Last Modified:     {0}" -f $User.Modified)
+            Write-Host ""
+
+            # Password Info
+            Write-Host "--- Password Info ---" -ForegroundColor Cyan
+            Write-Host ("Password Changed:  {0}" -f $User.PasswordLastSet)
+            Write-Host ("Password Expired:  {0}" -f $User.PasswordExpired)
+            Write-Host ("Never Expires:     {0}" -f $User.PasswordNeverExpires)
+            
+            # Calculate password expiration
+            $pwdExpInfo = Get-PasswordExpirationDate -User $User -Domain $TargetDomain
+            if ($pwdExpInfo.ExpirationDate) {
+                Write-Host ("Password Expires:  {0}" -f $pwdExpInfo.ExpirationDate.ToString("dd/MM/yyyy HH:mm:ss")) -NoNewline
+                
+                # Color-code based on days remaining
+                $daysColor = switch ($pwdExpInfo.Status) {
+                    "EXPIRED" { "Red" }
+                    "Expires Soon!" { "Red" }
+                    "Warning" { "Yellow" }
+                    default { "Green" }
+                }
+                Write-Host (" ({0} days)" -f $pwdExpInfo.DaysRemaining) -ForegroundColor $daysColor
+            }
+            else {
+                Write-Host ("Password Expires:  {0}" -f $pwdExpInfo.Status) -ForegroundColor DarkGray
+            }
+            
+            if ($pwdExpInfo.MaxPwdAgeDays) {
+                Write-Host ("Policy Max Age:    {0} days" -f $pwdExpInfo.MaxPwdAgeDays) -ForegroundColor DarkGray
+            }
             Write-Host ""
 
             # AD Location
