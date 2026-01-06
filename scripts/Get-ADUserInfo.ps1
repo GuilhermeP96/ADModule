@@ -608,8 +608,9 @@ $CurrentLoggedUser = $env:USERNAME
 
 # Configuration
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
-$DllPath = Join-Path $ScriptPath "Microsoft.ActiveDirectory.Management.dll"
-$ModulePath = Join-Path $ScriptPath "ActiveDirectory\ActiveDirectory.psd1"
+$RootPath = Split-Path -Parent $ScriptPath  # Go up one level from /scripts to root
+$DllPath = Join-Path $RootPath "Microsoft.ActiveDirectory.Management.dll"
+$ModulePath = Join-Path $RootPath "ActiveDirectory\ActiveDirectory.psd1"
 
 # Function to request domain from user
 function Request-DomainFromUser {
