@@ -11,12 +11,18 @@
 .PARAMETER SamAccountName
     The login/username of the user to query. If not specified, displays menu.
 
+.PARAMETER Email
+    Email address to search for in AD (EmailAddress field). Case-insensitive.
+
+.PARAMETER FullName
+    Full name to search for in AD (Name/DisplayName). Supports spaces when quoted. Case-insensitive.
+
 .PARAMETER Domain
     The domain to use. If not specified, attempts automatic detection.
     Can be a single domain or comma-separated list to try multiple.
 
 .PARAMETER NoMenu
-    Skips the menu and uses SamAccountName directly.
+    Skips the menu and uses the provided search parameter directly.
 
 .PARAMETER AllFields
     Displays ALL AD fields without exception (all available attributes).
@@ -55,12 +61,26 @@
 .EXAMPLE
     .\Get-ADUserInfo.ps1 -BatchFile "C:\temp\users.txt"
     Batch queries users from a text file (opens file dialog for output).
+
+.EXAMPLE
+    .\Get-ADUserInfo.ps1 -Email "john.doe@company.com" -NoMenu
+    Searches for user by email address.
+
+.EXAMPLE
+    .\Get-ADUserInfo.ps1 -FullName "John Doe" -NoMenu
+    Searches for user by full name (case-insensitive, supports spaces).
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false, Position = 0)]
     [string]$SamAccountName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$Email,
+
+    [Parameter(Mandatory = $false)]
+    [string]$FullName,
 
     [Parameter(Mandatory = $false)]
     [string]$Domain,
@@ -333,9 +353,13 @@ function Show-UserMenu {
     Write-Host "  [1] Use local logged-in user: " -NoNewline -ForegroundColor Cyan
     Write-Host $CurrentUser -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  [2] Enter user manually" -ForegroundColor Cyan
+    Write-Host "  [2] Enter SamAccountName (login)" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  [3] Batch process from file (TXT/CSV)" -ForegroundColor Cyan
+    Write-Host "  [3] Search by Email address" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host '  [4] Search by Full Name (e.g. "John Doe")' -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  [5] Batch process from file (TXT/CSV)" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  [0] Exit" -ForegroundColor DarkGray
     Write-Host ""
@@ -343,11 +367,11 @@ function Show-UserMenu {
     Write-Host ""
     
     do {
-        $choice = Read-Host "Choose an option (0-3)"
+        $choice = Read-Host "Choose an option (0-5)"
         
         switch ($choice) {
             "1" {
-                return $CurrentUser
+                return @{ Type = "sam"; Value = $CurrentUser }
             }
             "2" {
                 Write-Host ""
@@ -356,11 +380,32 @@ function Show-UserMenu {
                     Write-Host "[!] User cannot be empty. Try again." -ForegroundColor Red
                     $choice = $null
                 } else {
-                    return $manualUser.Trim()
+                    return @{ Type = "sam"; Value = $manualUser.Trim() }
                 }
             }
             "3" {
-                return "__BATCH_MODE__"
+                Write-Host ""
+                $emailInput = Read-Host "Enter the email address"
+                if ([string]::IsNullOrWhiteSpace($emailInput)) {
+                    Write-Host "[!] Email cannot be empty. Try again." -ForegroundColor Red
+                    $choice = $null
+                } else {
+                    return @{ Type = "email"; Value = $emailInput.Trim() }
+                }
+            }
+            "4" {
+                Write-Host ""
+                $nameInput = Read-Host 'Enter the full name (e.g. "John Doe")'
+                $nameInput = $nameInput.Trim('"').Trim("'").Trim()
+                if ([string]::IsNullOrWhiteSpace($nameInput)) {
+                    Write-Host "[!] Name cannot be empty. Try again." -ForegroundColor Red
+                    $choice = $null
+                } else {
+                    return @{ Type = "fullname"; Value = $nameInput }
+                }
+            }
+            "5" {
+                return @{ Type = "batch"; Value = $null }
             }
             "0" {
                 Write-Host ""
@@ -368,11 +413,52 @@ function Show-UserMenu {
                 exit 0
             }
             default {
-                Write-Host "[!] Invalid option. Enter 0, 1, 2 or 3." -ForegroundColor Red
+                Write-Host "[!] Invalid option. Enter 0, 1, 2, 3, 4 or 5." -ForegroundColor Red
                 $choice = $null
             }
         }
     } while ($null -eq $choice)
+}
+
+# Function to resolve user by filter (Email or FullName)
+function Resolve-ADUserByFilter {
+    param(
+        [string]$FilterExpression,
+        [string]$TargetDomain,
+        [string]$SearchLabel
+    )
+
+    Write-Host "[*] Searching by $SearchLabel..." -ForegroundColor Yellow
+
+    $adParams = @{ Filter = $FilterExpression; Properties = '*' }
+    if ($TargetDomain) { $adParams['Server'] = $TargetDomain }
+
+    $found = @(Get-ADUser @adParams -ErrorAction Stop)
+
+    if ($found.Count -eq 0) {
+        return $null
+    }
+    elseif ($found.Count -eq 1) {
+        Write-Host "[+] Found: " -NoNewline -ForegroundColor Green
+        Write-Host "$($found[0].DisplayName) ($($found[0].SamAccountName))" -ForegroundColor White
+        return $found[0]
+    }
+    else {
+        Write-Host "[!] Multiple users found ($($found.Count)):" -ForegroundColor Yellow
+        for ($i = 0; $i -lt $found.Count; $i++) {
+            $u = $found[$i]
+            Write-Host ("  [{0}] {1} | {2} | {3}" -f ($i + 1), $u.SamAccountName, $u.DisplayName, $u.EmailAddress) -ForegroundColor Cyan
+        }
+        Write-Host "  [0] Cancel" -ForegroundColor DarkGray
+        Write-Host ""
+        do {
+            $sel = Read-Host "Select user (0-$($found.Count))"
+            if ($sel -eq "0") { return $null }
+            $idx = [int]$sel - 1
+            if ($idx -ge 0 -and $idx -lt $found.Count) { return $found[$idx] }
+            Write-Host "[!] Invalid selection." -ForegroundColor Red
+        } while ($true)
+    }
 }
 
 # Function to display output format menu
@@ -785,29 +871,43 @@ if ($BatchFile) {
     $BatchMode = $true
 }
 
-# Determine which user to query
+# Determine search mode
+$SearchInfo = $null
+
 if ($BatchMode) {
-    $TargetUser = "__BATCH_MODE__"
+    $SearchInfo = @{ Type = "batch"; Value = $null }
     Write-Host "[*] Batch mode (from parameter)" -ForegroundColor DarkGray
 }
-elseif ($NoMenu -and $SamAccountName) {
-    # Direct mode without menu
-    $TargetUser = $SamAccountName
+elseif ($NoMenu) {
+    if ($Email) {
+        $SearchInfo = @{ Type = "email"; Value = $Email.Trim() }
+    } elseif ($FullName) {
+        $SearchInfo = @{ Type = "fullname"; Value = $FullName.Trim() }
+    } elseif ($SamAccountName) {
+        $SearchInfo = @{ Type = "sam"; Value = $SamAccountName.Trim() }
+    } else {
+        Write-Host "[X] -NoMenu requires -SamAccountName, -Email or -FullName." -ForegroundColor Red
+        exit 1
+    }
     Write-Host "[*] Direct mode (no menu)" -ForegroundColor DarkGray
 }
-elseif ($SamAccountName) {
-    # Has user as parameter, but displays menu to confirm
-    Write-Host "[*] User provided via parameter: " -NoNewline -ForegroundColor Yellow
-    Write-Host $SamAccountName -ForegroundColor White
-    $TargetUser = Show-UserMenu -CurrentUser $CurrentLoggedUser
+elseif ($SamAccountName -or $Email -or $FullName) {
+    if ($Email) {
+        $SearchInfo = @{ Type = "email"; Value = $Email.Trim() }
+    } elseif ($FullName) {
+        $SearchInfo = @{ Type = "fullname"; Value = $FullName.Trim() }
+    } else {
+        Write-Host "[*] User provided via parameter: " -NoNewline -ForegroundColor Yellow
+        Write-Host $SamAccountName -ForegroundColor White
+        $SearchInfo = Show-UserMenu -CurrentUser $CurrentLoggedUser
+    }
 }
 else {
-    # Display menu to choose
-    $TargetUser = Show-UserMenu -CurrentUser $CurrentLoggedUser
+    $SearchInfo = Show-UserMenu -CurrentUser $CurrentLoggedUser
 }
 
-# Handle batch mode selection from menu
-if ($TargetUser -eq "__BATCH_MODE__") {
+# Handle batch mode
+if ($SearchInfo.Type -eq "batch") {
     $BatchMode = $true
     
     # Get input file
@@ -844,8 +944,8 @@ if ($TargetUser -eq "__BATCH_MODE__") {
 
 if (-not $BatchMode) {
     Write-Host ""
-    Write-Host "[*] Selected user: " -NoNewline -ForegroundColor Green
-    Write-Host $TargetUser -ForegroundColor White
+    Write-Host "[*] Search type: " -NoNewline -ForegroundColor Green
+    Write-Host "$($SearchInfo.Type) = $($SearchInfo.Value)" -ForegroundColor White
 }
 
 # Detect or use specified domain
@@ -931,8 +1031,8 @@ if ($BatchMode) {
 
 # Single user query mode
 Write-Host ""
-Write-Host "[*] Querying user: " -NoNewline -ForegroundColor Yellow
-Write-Host $TargetUser -ForegroundColor White
+Write-Host "[*] Querying ($($SearchInfo.Type)): " -NoNewline -ForegroundColor Yellow
+Write-Host $SearchInfo.Value -ForegroundColor White
 
 # Try each domain in the list until successful
 $User = $null
@@ -943,11 +1043,23 @@ foreach ($tryDomain in $DomainList) {
     Write-Host $tryDomain -ForegroundColor White
     
     try {
-        $User = Get-ADUser -Identity $TargetUser -Server $tryDomain -Properties * -ErrorAction Stop
-        $SuccessDomain = $tryDomain
-        Write-Host "[+] Successfully connected to domain: " -NoNewline -ForegroundColor Green
-        Write-Host $tryDomain -ForegroundColor White
-        break
+        switch ($SearchInfo.Type) {
+            "sam" {
+                $User = Get-ADUser -Identity $SearchInfo.Value -Server $tryDomain -Properties * -ErrorAction Stop
+            }
+            "email" {
+                $User = Resolve-ADUserByFilter -FilterExpression "EmailAddress -eq '$($SearchInfo.Value)'" -TargetDomain $tryDomain -SearchLabel "Email '$($SearchInfo.Value)'"
+            }
+            "fullname" {
+                $User = Resolve-ADUserByFilter -FilterExpression "Name -eq '$($SearchInfo.Value)' -or DisplayName -eq '$($SearchInfo.Value)'" -TargetDomain $tryDomain -SearchLabel "Full Name '$($SearchInfo.Value)'"
+            }
+        }
+        if ($User) {
+            $SuccessDomain = $tryDomain
+            Write-Host "[+] Successfully connected to domain: " -NoNewline -ForegroundColor Green
+            Write-Host $tryDomain -ForegroundColor White
+            break
+        }
     }
     catch {
         Write-Host "[!] Failed on domain $tryDomain : $($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -956,12 +1068,19 @@ foreach ($tryDomain in $DomainList) {
 
 if (-not $User) {
     Write-Host ""
-    Write-Host "[X] Could not query user in any of the provided domains." -ForegroundColor Red
+    Write-Host "[X] Could not find or query user in any of the provided domains." -ForegroundColor Red
     Write-Host "[!] Please verify that:" -ForegroundColor Yellow
     Write-Host "    - You are connected to the corporate network/VPN" -ForegroundColor Yellow
     Write-Host "    - The domain name is correct" -ForegroundColor Yellow
-    Write-Host "    - The user '$TargetUser' exists in the domain" -ForegroundColor Yellow
+    Write-Host "    - The user exists in the domain" -ForegroundColor Yellow
     exit 1
+}
+
+# Ensure full properties are loaded (filter results may already have them)
+if (-not $User.PasswordLastSet -and $User.SamAccountName) {
+    try {
+        $User = Get-ADUser -Identity $User.SamAccountName -Server $SuccessDomain -Properties * -ErrorAction Stop
+    } catch {}
 }
 
 $TargetDomain = $SuccessDomain
